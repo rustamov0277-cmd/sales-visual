@@ -123,16 +123,32 @@ def collect():
     titles = [ws.title for ws in worksheets]
     data = {"period": "", "sellers": [], "rops": [], "people": {}}
 
-    # ВСЕ листы одним батч-запросом значений
+    # ВСЕ листы батч-запросами по частям — выдержит 150-200+ листов
     ranges = ["'" + t.replace("'", "''") + "'!A1:I60" for t in titles]
     sheets_values = {}
-    try:
-        batch = book.values_batch_get(ranges)
-        for t, vr in zip(titles, batch.get("valueRanges", [])):
-            sheets_values[t] = vr.get("values", [])
-    except Exception as e:
-        log.error("batch_get error: %s", e)
-        raise
+    CHUNK = 30
+    import time as _t
+    for start in range(0, len(ranges), CHUNK):
+        chunk_titles = titles[start:start + CHUNK]
+        chunk_ranges = ranges[start:start + CHUNK]
+        # до 3 попыток на каждую часть (на случай 429)
+        for attempt in range(3):
+            try:
+                batch = book.values_batch_get(chunk_ranges)
+                for t, vr in zip(chunk_titles, batch.get("valueRanges", [])):
+                    sheets_values[t] = vr.get("values", [])
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < 2:
+                    log.error("429 chunk %d — 30s kutaman", start // CHUNK)
+                    _t.sleep(30)
+                    continue
+                log.error("batch chunk %d error: %s", start // CHUNK, e)
+                break
+        if start + CHUNK < len(ranges):
+            _t.sleep(1.5)  # пауза между частями
+    log.info("Jami varaqlar o'qildi: %d / %d", len(sheets_values), len(titles))
+    log.info("Jami varaqlar o'qildi: %d / %d", len(sheets_values), len(titles))
 
     # Dashboard
     if DASH_SHEET in sheets_values:
