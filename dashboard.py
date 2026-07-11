@@ -264,6 +264,15 @@ def generate_html(all_months):
         "function rc(i){return i===0?'g1':i===1?'g2':i===2?'g3':''}"
         "function convOf(p){if(p.conv!=null)return p.conv;if(p.leads)return p.trans/p.leads*100;return null}"
         "function planOf(p){if(p.plandone!=null)return p.plandone;if(p.plan)return p.fact2/p.plan*100;return null}"
+        "function forecast(fact2){"
+        "if(fact2==null||fact2<=0)return null;"
+        "if(!(ALL.months[_mi]&&ALL.months[_mi].current))return fact2;"
+        "var now=new Date();var y=now.getFullYear(),m=now.getMonth();"
+        "var dayNow=now.getDate();"
+        "var daysInMonth=new Date(y,m+1,0).getDate();"
+        "if(dayNow<1)return null;"
+        "var perDay=fact2/dayNow;"
+        "return perDay*daysInMonth}"
         "function idInRange(name){var m=(name||'').match(/(\\d{2,4})\\s*$/);if(!m)return false;var id=parseInt(m[1]);return id>=107&&id<=147}"
         "function bonusInfo(name,fact2){"
         "var tiers=[[70000000,2000000],[60000000,1500000],[45000000,1000000]];"
@@ -282,8 +291,12 @@ def generate_html(all_months):
         "+'<td>'+num(p.trans)+'</td>'"
         "+'<td>'+num(p.leads)+'</td>'"
         "+'<td>'+cb+'</td>'"
-        "+'<td style=\"min-width:130px\"><div class=\"pw\"><div class=\"bar\"><div class=\"barf'+fc+'\" style=\"width:'+Math.min(pl||0,100)+'%\"></div></div><span class=\"pp\" style=\"color:'+col+'\">'+pct(pl)+'</span></div></td></tr>'}).join('');"
-        "return '<table><thead><tr><th>#</th><th>'+title+'</th><th>Uspeshka (Fakt2)</th><th>Zakazlar (Fakt1)</th><th>Tranz.</th><th>Lid</th><th>Konv.</th><th>Plan bajarish</th></tr></thead><tbody>'+body+'</tbody></table>'}"
+        "+'<td style=\"min-width:130px\"><div class=\"pw\"><div class=\"bar\"><div class=\"barf'+fc+'\" style=\"width:'+Math.min(pl||0,100)+'%\"></div></div><span class=\"pp\" style=\"color:'+col+'\">'+pct(pl)+'</span></div></td>'"
+        "+(function(){var fr=forecast(p.fact2);if(fr==null)return '<td style=\"color:var(--mut)\">-</td>';"
+        "var frcol=(p.plan&&fr>=p.plan)?'#22c55e':(p.plan&&fr>=p.plan*0.8)?'#fbbf24':'#f87171';"
+        "return '<td class=\"money\" style=\"color:'+frcol+'\">'+money(fr)+'</td>'})()"
+        "+'</tr>'}).join('');"
+        "return '<table><thead><tr><th>#</th><th>'+title+'</th><th>Uspeshka (Fakt2)</th><th>Zakazlar (Fakt1)</th><th>Tranz.</th><th>Lid</th><th>Konv.</th><th>Plan bajarish</th><th>Prognoz (oy oxiri)</th></tr></thead><tbody>'+body+'</tbody></table>'}"
         "function personPage(name,obj){var p=(obj&&obj.total)||{};var days=(obj&&obj.days)||[];var cv=convOf(p),pl=planOf(p);"
         "var cards='<div class=\"cards\">'"
         "+'<div class=\"c\"><div class=\"l\">Lid</div><div class=\"v\">'+num(p.leads)+'</div></div>'"
@@ -397,7 +410,8 @@ if __name__ == "__main__":
                 data = collect(m["id"])
                 log.info("Oy '%s': sotuvchi=%d, komanda=%d, shaxsiy varaq=%d",
                          m["name"], len(data["sellers"]), len(data["rops"]), len(data["people"]))
-                all_months.append({"name": m["name"], "data": data})
+                all_months.append({"name": m["name"], "data": data,
+                                   "current": (len(all_months) == 0)})
                 break
             except Exception as e:
                 if "429" in str(e) and attempts < 4:
