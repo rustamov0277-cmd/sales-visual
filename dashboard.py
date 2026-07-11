@@ -7,13 +7,16 @@ Sheets -> дашборд (GitHub Pages).
 Ключи/пути - в переменных окружения (см. инструкцию внизу).
 """
 
-import os, json, base64, ssl, urllib.request, urllib.error, logging
+import os, sys, json, base64, ssl, urllib.request, urllib.error, logging
 from datetime import datetime, timezone, timedelta
 
 import gspread
 from google.oauth2.service_account import Credentials
 
 SHEET_ID    = os.environ.get("SHEET_ID", "1pufQB6lW_KrTgh_fEjhZSfNLUurpP8Z5T3maOX8P3tk")
+# config-файл со списком месяцев (лист "Oylar": Oy nomi | Sheet ID | Faol).
+# Если не задан — используем SHEET_ID как единственный месяц.
+CONFIG_SHEET_ID = os.environ.get("CONFIG_SHEET_ID", "")
 SA_JSON     = os.environ.get("SA_JSON_PATH", "/root/sheets_dashboard/service_account.json")
 GITHUB_TOKEN = os.environ.get("DASH_GITHUB_TOKEN", "")
 GITHUB_USER = os.environ.get("DASH_GITHUB_USER", "rustamov0277-cmd")
@@ -22,16 +25,42 @@ GITHUB_FILE = "index.html"
 
 DASH_SHEET = "Dashboard"
 ROP_SHEET  = "ROP dashboard"
+CONFIG_WS  = "Oylar"
 TZ = timezone(timedelta(hours=5))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
-def open_book():
+def _gc():
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     creds = Credentials.from_service_account_file(SA_JSON, scopes=scopes)
-    gc = gspread.authorize(creds)
-    return gc.open_by_key(SHEET_ID)
+    return gspread.authorize(creds)
+
+def open_book(sheet_id=None):
+    return _gc().open_by_key(sheet_id or SHEET_ID)
+
+def load_months():
+    """Читает config-лист 'Oylar' -> [{'name','id'}]. Если конфига нет — один месяц."""
+    if not CONFIG_SHEET_ID:
+        return [{"name": "Жорий ой", "id": SHEET_ID}]
+    try:
+        book = _gc().open_by_key(CONFIG_SHEET_ID)
+        ws = book.worksheet(CONFIG_WS)
+        rows = ws.get_all_values()
+    except Exception as e:
+        log.error("config o'qilmadi: %s — bitta oy ishlatamiz", e)
+        return [{"name": "Жорий ой", "id": SHEET_ID}]
+    months = []
+    for r in rows[1:]:
+        if len(r) < 2 or not r[0].strip() or not r[1].strip():
+            continue
+        faol = (r[2].strip().lower() if len(r) > 2 else "ha")
+        if faol in ("ha", "yes", "1", ""):
+            months.append({"name": r[0].strip(), "id": r[1].strip()})
+    if not months:
+        return [{"name": "Жорий ой", "id": SHEET_ID}]
+    return months
+
 
 def _num(v):
     if v is None:
@@ -119,8 +148,8 @@ def safe_ws(book, title):
     except Exception:
         return None
 
-def collect():
-    book = open_book()
+def collect(sheet_id=None):
+    book = open_book(sheet_id)
     # один запрос метаданных — берём названия листов
     worksheets = book.worksheets()
     titles = [ws.title for ws in worksheets]
@@ -173,9 +202,11 @@ def collect():
             data["people"][t] = person
     return data
 
-def generate_html(data):
+def generate_html(all_months):
+    """all_months = [{'name':..., 'data':{...}}]. Первый — текущий (по умолчанию)."""
     updated = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
-    payload = json.dumps(data, ensure_ascii=False)
+    # payload: {months:[{name,data}], default:0}
+    payload = json.dumps({"months": all_months}, ensure_ascii=False)
 
     css = (
         "@import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@400;700;900&family=Inter:wght@300;400;500;600&display=swap');"
@@ -216,10 +247,16 @@ def generate_html(data):
         ".barf.over{background:linear-gradient(90deg,#22c55e,#84cc16)}"
         ".pw{display:flex;align-items:center;gap:.5rem}.pp{font-family:Unbounded;font-size:.78rem;font-weight:700;min-width:42px;text-align:right}"
         ".empty{color:var(--mut);text-align:center;padding:2rem;font-size:.85rem}"
+        ".moybar{display:flex;gap:.4rem;padding:.8rem 1.6rem 0;flex-wrap:wrap}"
+        ".moy{padding:.5rem 1.1rem;border-radius:8px;border:1px solid var(--line);cursor:pointer;font-size:.8rem;font-weight:600;color:var(--mut);background:var(--card);font-family:Unbounded}"
+        ".moy:hover{color:var(--txt)}"
+        ".moy-active{background:linear-gradient(135deg,#22c55e,#06b6d4);color:#fff;border-color:transparent}"
     )
 
     js = (
-        "var D=" + payload + ";"
+        "var ALL=" + payload + ";"
+        "var _mi=0;"
+        "var D=(ALL.months[_mi]||{}).data||{sellers:[],rops:[],people:{},period:''};"
         "function money(v){if(v==null)return '-';return Math.round(v).toLocaleString('ru-RU')}"
         "function num(v){if(v==null)return '-';return Math.round(v).toLocaleString('ru-RU')}"
         "function pct(v){if(v==null)return '-';return Math.round(v)+'%'}"
@@ -284,25 +321,34 @@ def generate_html(data):
         "y:{position:'left',ticks:{color:'#22c55e',font:{size:9}},grid:{color:'#1c2530'}},"
         "y1:{position:'right',ticks:{color:'#06b6d4',font:{size:9}},grid:{display:false}}}}})})}"
         "var nav=document.getElementById('nav'),content=document.getElementById('content');"
+        "function buildTabs(){"
+        "nav.innerHTML='';content.innerHTML='';"
         "var tabs=[];"
         "tabs.push(['Sotuvchilar',function(){return rankTable(D.sellers||[],'Sotuvchi')}]);"
         "tabs.push(['Komandalar',function(){return rankTable(D.rops||[],'ROP / Komanda')}]);"
         "tabs.forEach(function(t,i){var b=document.createElement('button');b.className='tab'+(i===0?' active':'');b.textContent=t[0];b.onclick=(function(i){return function(){sw(i)}})(i);nav.appendChild(b);var pn=document.createElement('div');pn.className='panel'+(i===0?' active':'');pn.id='p'+i;pn.innerHTML=t[1]();content.appendChild(pn)});"
-        "function extractId(name){var m=(name||'').match(/(\\d{2,4})\\s*$/);return m?parseInt(m[1]):999999}"
         "var names=Object.keys(D.people||{}).sort(function(a,b){var ia=extractId(a),ib=extractId(b);if(ia!==ib)return ia-ib;return a.localeCompare(b)});"
         "names.forEach(function(name,k){var idx=k+2;var b=document.createElement('button');b.className='tab';b.textContent=name;b.onclick=(function(idx){return function(){sw(idx)}})(idx);nav.appendChild(b);var pn=document.createElement('div');pn.className='panel';pn.id='p'+idx;pn.innerHTML='<h2 style=\"font-family:Unbounded;font-size:1rem;margin-bottom:1rem\">'+name+'</h2>'+personPage(name,D.people[name]);content.appendChild(pn)});"
+        "if(window.Chart)drawCharts();}"
+        "function extractId(name){var m=(name||'').match(/(\\d{2,4})\\s*$/);return m?parseInt(m[1]):999999}"
+        "function switchMonth(mi){_mi=mi;D=(ALL.months[mi]||{}).data||{sellers:[],rops:[],people:{}};"
+        "document.querySelectorAll('.moy').forEach(function(b,k){b.classList.toggle('moy-active',k===mi)});"
+        "buildTabs();document.querySelector('.period').textContent=D.period||''}"
+        "var moybar=document.getElementById('moybar');"
+        "if(ALL.months.length>1){ALL.months.forEach(function(m,mi){var b=document.createElement('button');b.className='moy'+(mi===0?' moy-active':'');b.textContent=m.name;b.onclick=(function(mi){return function(){switchMonth(mi)}})(mi);moybar.appendChild(b)})}"
+        "buildTabs();"
         "function sw(i){document.querySelectorAll('.tab').forEach(function(t,k){t.classList.toggle('active',k===i)});document.querySelectorAll('.panel').forEach(function(p,k){p.classList.toggle('active',k===i)});if(window.Chart)drawCharts()}"
         "setTimeout(function(){location.reload()},600000);"
-        "if(window.Chart)drawCharts();"
     )
 
-    period = data.get("period") or ""
+    period = (all_months[0]["data"].get("period") if all_months else "") or ""
     return ('<!DOCTYPE html><html lang="uz"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
             '<title>Sotuvchilar dashboard</title>'
             '<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>'
             '<style>' + css + '</style></head><body>'
             '<header><h1>Sotuvchilar dashboardi</h1><span class="upd">Yangilandi: ' + updated + '</span></header>'
+            '<div class="moybar" id="moybar"></div>'
             '<div class="period">' + period + '</div>'
             '<div class="nav" id="nav"></div><div class="content" id="content"></div>'
             '<script>' + js + '</script></body></html>')
@@ -340,23 +386,29 @@ def push_github(html):
 
 if __name__ == "__main__":
     import time
-    attempts = 0
-    while True:
-        attempts += 1
-        try:
-            data = collect()
-            log.info("Oqildi: sotuvchi=%d, komanda=%d, shaxsiy varaq=%d",
-                     len(data["sellers"]), len(data["rops"]), len(data["people"]))
-            html = generate_html(data)
-            with open("/root/sheets_dashboard/index.html", "w", encoding="utf-8") as f:
-                f.write(html)
-            push_github(html)
-            break
-        except Exception as e:
-            msg = str(e)
-            if "429" in msg and attempts < 4:
-                log.error("429 limit — 65 сония кутиб қайта урунаман (urinish %d)", attempts)
-                time.sleep(65)
-                continue
-            log.error("FATAL: %s", e)
-            raise
+    months = load_months()
+    log.info("Oylar soni: %d", len(months))
+    all_months = []
+    for m in months:
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                data = collect(m["id"])
+                log.info("Oy '%s': sotuvchi=%d, komanda=%d, shaxsiy varaq=%d",
+                         m["name"], len(data["sellers"]), len(data["rops"]), len(data["people"]))
+                all_months.append({"name": m["name"], "data": data})
+                break
+            except Exception as e:
+                if "429" in str(e) and attempts < 4:
+                    log.error("429 — 65s kutaman (%s, urinish %d)", m["name"], attempts)
+                    time.sleep(65); continue
+                log.error("Oy '%s' xato: %s — o'tkazib yuboraman", m["name"], e)
+                break
+        time.sleep(2)  # пауза между месяцами
+    if not all_months:
+        log.error("FATAL: hech qanday oy o'qilmadi"); sys.exit(1)
+    html = generate_html(all_months)
+    with open("/root/sheets_dashboard/index.html", "w", encoding="utf-8") as f:
+        f.write(html)
+    push_github(html)
